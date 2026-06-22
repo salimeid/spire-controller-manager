@@ -362,7 +362,9 @@ func run(mainConfig Config) (err error) {
 			EntryIDPrefixCleanup:   mainConfig.ctrlConfig.EntryIDPrefixCleanup,
 			EnableEntryRenderCache: mainConfig.ctrlConfig.EnableEntryRenderCache,
 			EntryRenderCacheSize:   mainConfig.ctrlConfig.EntryRenderCacheSize,
+			EnableGlobPatterns:     mainConfig.ctrlConfig.EnableGlobPatterns,
 		})
+		setupLog.Info("entry reconciler configured", "enableGlobPatterns", mainConfig.ctrlConfig.EnableGlobPatterns)
 	}
 
 	var federationRelationshipReconciler reconciler.Reconciler
@@ -523,6 +525,7 @@ func staticRun(mainConfig Config) (err error) {
 			ExpandEnvStaticManifests: mainConfig.ctrlConfig.ExpandEnvStaticManifests,
 			EnableEntryRenderCache:   mainConfig.ctrlConfig.EnableEntryRenderCache,
 			EntryRenderCacheSize:     mainConfig.ctrlConfig.EntryRenderCacheSize,
+			EnableGlobPatterns:       mainConfig.ctrlConfig.EnableGlobPatterns,
 		})
 		go func() {
 			err := entryReconciler.Run(ctx)

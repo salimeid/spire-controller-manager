@@ -167,6 +167,12 @@ type ControllerManagerConfigurationSpec struct {
 	// Defaults to 300000 if unset or zero.
 	// +optional
 	EntryRenderCacheSize int `json:"entryRenderCacheSize,omitempty"`
+
+	// EnableGlobPatterns enables wildcard glob pattern expansion in federatesWith fields.
+	// When true, patterns like "fed-*.example.org" in federatesWith are expanded against
+	// known ClusterFederatedTrustDomains. Defaults to false.
+	// +optional
+	EnableGlobPatterns bool `json:"enableGlobPatterns,omitempty"`
 }
 
 // ReconcileConfig configuration used to enable/disable syncing various types

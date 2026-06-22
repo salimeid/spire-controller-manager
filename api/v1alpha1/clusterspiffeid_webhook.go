@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"text/template"
 	"time"
 
@@ -126,6 +127,12 @@ func ParseClusterSPIFFEIDSpec(spec *ClusterSPIFFEIDSpec) (*ParsedClusterSPIFFEID
 
 	federatesWith := make([]spiffeid.TrustDomain, 0, len(spec.FederatesWith))
 	for _, value := range spec.FederatesWith {
+		// Allow wildcard patterns like "fed-*.example.org" to pass through validation
+		// They will be expanded during reconciliation if the feature is enabled
+		if strings.Contains(value, "*") {
+			// Skip parsing for wildcard patterns; they're validated at reconciliation time
+			continue
+		}
 		td, err := spiffeid.TrustDomainFromString(value)
 		if err != nil {
 			return nil, fmt.Errorf("invalid federatesWith value: %w", err)

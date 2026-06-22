@@ -92,6 +92,11 @@ type ReconcilerConfig struct {
 	// for rendered pod entries. Only used when EnableEntryRenderCache is true.
 	// If zero, defaults to defaultEntryRenderCacheSize.
 	EntryRenderCacheSize int
+
+	// EnableGlobPatterns enables wildcard glob pattern expansion in federatesWith fields.
+	// When disabled, glob patterns are passed through unchanged.
+	// Defaults to false.
+	EnableGlobPatterns bool
 }
 
 const (
@@ -184,10 +189,10 @@ func (r *entryReconciler) reconcile(ctx context.Context) {
 			log.Error(err, "Failed to list ClusterStaticEntries")
 			return
 		}
-		r.addClusterStaticEntryEntriesState(ctx, state, clusterStaticEntries)
 	}
 
 	clusterSPIFFEIDs := []*ClusterSPIFFEID{}
+	nodeMap := map[string]*corev1.Node{}
 	if r.config.Reconcile.ClusterSPIFFEIDs {
 		// Load and add entry state for ClusterSPIFFEIDs
 		clusterSPIFFEIDs, err = r.listClusterSPIFFEIDs(ctx)
@@ -198,12 +203,34 @@ func (r *entryReconciler) reconcile(ctx context.Context) {
 
 		// Pre-load all nodes into a map to avoid per-pod Get() calls,
 		// which each incur a deep copy and mutex lock on the informer cache.
-		nodeMap, err := r.buildNodeMap(ctx)
+		nodeMap, err = r.buildNodeMap(ctx)
 		if err != nil {
 			log.Error(err, "Failed to list nodes")
 			return
 		}
-		r.addClusterSPIFFEIDEntriesState(ctx, state, clusterSPIFFEIDs, nodeMap)
+	}
+
+	// Load known trust domains for wildcard expansion (only if feature enabled)
+	var knownTrustDomains []string
+	if r.config.EnableGlobPatterns {
+		clusterFederatedTrustDomains, err := r.listClusterFederatedTrustDomains(ctx, r.expandEnvStaticManifests)
+		if err != nil {
+			log.Error(err, "Failed to list ClusterFederatedTrustDomains")
+			return
+		}
+		knownTrustDomains = make([]string, 0, len(clusterFederatedTrustDomains))
+		for domain := range clusterFederatedTrustDomains {
+			knownTrustDomains = append(knownTrustDomains, domain)
+		}
+		sort.Strings(knownTrustDomains)
+	}
+
+	if r.config.Reconcile.ClusterStaticEntries {
+		r.addClusterStaticEntryEntriesState(ctx, state, clusterStaticEntries, knownTrustDomains)
+	}
+
+	if r.config.Reconcile.ClusterSPIFFEIDs {
+		r.addClusterSPIFFEIDEntriesState(ctx, state, clusterSPIFFEIDs, nodeMap, knownTrustDomains)
 	}
 
 	var toDelete []spireapi.Entry
@@ -409,6 +436,25 @@ func (r *entryReconciler) listClusterSPIFFEIDs(ctx context.Context) ([]*ClusterS
 	return out, nil
 }
 
+func (r *entryReconciler) listClusterFederatedTrustDomains(ctx context.Context, expandEnv bool) (map[string]struct{}, error) {
+	var clusterFederatedTrustDomains []spirev1alpha1.ClusterFederatedTrustDomain
+	var err error
+	if r.config.K8sClient != nil {
+		clusterFederatedTrustDomains, err = k8sapi.ListClusterFederatedTrustDomains(ctx, r.config.K8sClient)
+	} else {
+		clusterFederatedTrustDomains, err = spirev1alpha1.ListClusterFederatedTrustDomains(ctx, *r.staticManifestPath, expandEnv)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	domains := make(map[string]struct{}, len(clusterFederatedTrustDomains))
+	for _, cftd := range clusterFederatedTrustDomains {
+		domains[cftd.Spec.TrustDomain] = struct{}{}
+	}
+	return domains, nil
+}
+
 func (r *entryReconciler) buildNodeMap(ctx context.Context) (map[string]*corev1.Node, error) {
 	nodes, err := k8sapi.ListNodes(ctx, r.config.K8sClient)
 	if err != nil {
@@ -429,11 +475,16 @@ func (r *entryReconciler) listNamespacePods(ctx context.Context, namespace strin
 	return k8sapi.ListNamespacePods(ctx, r.config.K8sClient, namespace, podSelector)
 }
 
-func (r *entryReconciler) addClusterStaticEntryEntriesState(ctx context.Context, state entriesState, clusterStaticEntries []*ClusterStaticEntry) {
+func (r *entryReconciler) addClusterStaticEntryEntriesState(ctx context.Context, state entriesState, clusterStaticEntries []*ClusterStaticEntry, knownTrustDomains []string) {
 	log := log.FromContext(ctx)
 	for _, clusterStaticEntry := range clusterStaticEntries {
 		log := log.WithValues(clusterSPIFFEIDLogKey, objectName(clusterStaticEntry))
-		entry, err := renderStaticEntry(&clusterStaticEntry.Spec)
+
+		spec := clusterStaticEntry.Spec
+		// Expand wildcards in FederatesWith if feature enabled
+		spec.FederatesWith = expandFederatesWithWildcardsIfEnabled(spec.FederatesWith, knownTrustDomains, r.config.EnableGlobPatterns)
+
+		entry, err := renderStaticEntry(&spec)
 		if err != nil {
 			log.Error(err, "Failed to render ClusterStaticEntry")
 			clusterStaticEntry.NextStatus.Rendered = false
@@ -445,7 +496,7 @@ func (r *entryReconciler) addClusterStaticEntryEntriesState(ctx context.Context,
 	}
 }
 
-func (r *entryReconciler) addClusterSPIFFEIDEntriesState(ctx context.Context, state entriesState, clusterSPIFFEIDs []*ClusterSPIFFEID, nodeMap map[string]*corev1.Node) {
+func (r *entryReconciler) addClusterSPIFFEIDEntriesState(ctx context.Context, state entriesState, clusterSPIFFEIDs []*ClusterSPIFFEID, nodeMap map[string]*corev1.Node, knownTrustDomains []string) {
 	log := log.FromContext(ctx)
 	podsWithNonFallbackApplied := make(map[types.UID]struct{})
 	// Process all the fallback clusterSPIFFEIDs last.
@@ -468,6 +519,37 @@ func (r *entryReconciler) addClusterSPIFFEIDEntriesState(ctx context.Context, st
 			log.Error(err, "Failed to parse ClusterSPIFFEID spec")
 			continue
 		}
+
+		// Use raw federatesWith from spec (includes wildcards), not parsed spec
+		federatesWithStrs := clusterSPIFFEID.Spec.FederatesWith
+
+		// Log if wildcard patterns are present
+		if hasWildcardPattern(federatesWithStrs) {
+			log.Info("ClusterSPIFFEID has wildcard patterns in federatesWith",
+				"federatesWith", federatesWithStrs,
+				"globPatternsEnabled", r.config.EnableGlobPatterns)
+		}
+
+		expandedStrs := expandFederatesWithWildcardsIfEnabled(federatesWithStrs, knownTrustDomains, r.config.EnableGlobPatterns)
+
+		// Log expansion result if patterns were present
+		if hasWildcardPattern(federatesWithStrs) && r.config.EnableGlobPatterns {
+			log.Info("Expanded wildcard patterns in federatesWith",
+				"original", federatesWithStrs,
+				"expanded", expandedStrs)
+		}
+
+		// Convert expanded strings back to TrustDomain objects
+		expandedFederatesWith := make([]spiffeid.TrustDomain, 0, len(expandedStrs))
+		for _, value := range expandedStrs {
+			td, err := spiffeid.TrustDomainFromString(value)
+			if err != nil {
+				log.Error(err, "Failed to parse expanded federatesWith value", "value", value)
+				continue
+			}
+			expandedFederatesWith = append(expandedFederatesWith, td)
+		}
+		spec.FederatesWith = expandedFederatesWith
 
 		// Compute spec hash once per ClusterSPIFFEID (only needed when cache is enabled)
 		var specHash string

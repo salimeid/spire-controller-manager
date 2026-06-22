@@ -253,3 +253,89 @@ func appendIfNotExists(slice []string, sliceSet map[string]struct{}, items ...st
 
 	return slice
 }
+
+func expandFederatesWithWildcards(wildcards []string, known []string) []string {
+	if len(wildcards) == 0 {
+		return []string{}
+	}
+
+	result := []string{}
+	seenSet := make(map[string]struct{})
+
+	for _, w := range wildcards {
+		if !strings.Contains(w, "*") {
+			// Static domain, add as-is
+			if _, seen := seenSet[w]; !seen {
+				result = append(result, w)
+				seenSet[w] = struct{}{}
+			}
+			continue
+		}
+
+		// Wildcard pattern: match against known domains
+		expanded := []string{}
+		for _, k := range known {
+			if globMatch(w, k) {
+				if _, seen := seenSet[k]; !seen {
+					expanded = append(expanded, k)
+					seenSet[k] = struct{}{}
+				}
+			}
+		}
+		sort.Strings(expanded)
+		result = append(result, expanded...)
+	}
+
+	return result
+}
+
+func globMatch(pattern, s string) bool {
+	// Simple glob matching: * matches any sequence of characters
+	parts := strings.Split(pattern, "*")
+	if len(parts) == 1 {
+		return pattern == s
+	}
+
+	pos := 0
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		if i == 0 {
+			if !strings.HasPrefix(s, part) {
+				return false
+			}
+			pos = len(part)
+		} else if i == len(parts)-1 {
+			if !strings.HasSuffix(s, part) {
+				return false
+			}
+		} else {
+			idx := strings.Index(s[pos:], part)
+			if idx == -1 {
+				return false
+			}
+			pos += idx + len(part)
+		}
+	}
+	return true
+}
+
+// expandFederatesWithWildcardsIfEnabled expands wildcard patterns only if the feature is enabled.
+// If disabled, returns domains unchanged.
+func expandFederatesWithWildcardsIfEnabled(domains []string, knownTrustDomains []string, enableGlobPatterns bool) []string {
+	if !enableGlobPatterns {
+		return domains
+	}
+	return expandFederatesWithWildcards(domains, knownTrustDomains)
+}
+
+// hasWildcardPattern checks if any domain contains a wildcard character.
+func hasWildcardPattern(domains []string) bool {
+	for _, d := range domains {
+		if strings.Contains(d, "*") {
+			return true
+		}
+	}
+	return false
+}
