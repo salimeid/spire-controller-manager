@@ -48,6 +48,12 @@ clusterName: cluster2
 trustDomain: $TRUST_DOMAIN
 `
 
+	fileContentFederatesWithPatternExpansion = `
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ControllerManagerConfig
+enableFederatesWithPatternExpansion: true
+`
+
 	cacheNamespace = `
 cacheNamespace: default
 `
@@ -256,4 +262,21 @@ func TestLoadOptionsWithCacheNamespaces(t *testing.T) {
 			require.Equal(t, tt.expectNamespaces, options.Cache.DefaultNamespaces)
 		})
 	}
+}
+
+func TestLoadOptionsFromFileFederatesWithPatternExpansionField(t *testing.T) {
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(spirev1alpha1.AddToScheme(scheme))
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(fileContentFederatesWithPatternExpansion), 0600))
+
+	options := ctrl.Options{Scheme: scheme}
+	ctrlConfig := spirev1alpha1.ControllerManagerConfig{}
+
+	err := spirev1alpha1.LoadOptionsFromFile(path, scheme, &options, &ctrlConfig, false)
+	require.NoError(t, err)
+	require.True(t, ctrlConfig.EnableFederatesWithPatternExpansion)
 }

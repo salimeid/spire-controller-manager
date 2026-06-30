@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"text/template"
 	"time"
@@ -100,6 +101,16 @@ type ParsedClusterSPIFFEIDSpec struct {
 
 // ParseClusterSPIFFEIDSpec parses and validates the fields in the ClusterSPIFFEIDSpec
 func ParseClusterSPIFFEIDSpec(spec *ClusterSPIFFEIDSpec) (*ParsedClusterSPIFFEIDSpec, error) {
+	return parseClusterSPIFFEIDSpec(spec, false)
+}
+
+// ParseClusterSPIFFEIDSpecWithPatternExpansion parses and validates the fields
+// in the ClusterSPIFFEIDSpec, allowing pattern values in federatesWith.
+func ParseClusterSPIFFEIDSpecWithPatternExpansion(spec *ClusterSPIFFEIDSpec) (*ParsedClusterSPIFFEIDSpec, error) {
+	return parseClusterSPIFFEIDSpec(spec, true)
+}
+
+func parseClusterSPIFFEIDSpec(spec *ClusterSPIFFEIDSpec, enableFederatesWithPatternExpansion bool) (*ParsedClusterSPIFFEIDSpec, error) {
 	if spec.SPIFFEIDTemplate == "" {
 		return nil, errors.New("empty SPIFFEID template")
 	}
@@ -127,10 +138,10 @@ func ParseClusterSPIFFEIDSpec(spec *ClusterSPIFFEIDSpec) (*ParsedClusterSPIFFEID
 
 	federatesWith := make([]spiffeid.TrustDomain, 0, len(spec.FederatesWith))
 	for _, value := range spec.FederatesWith {
-		// Allow wildcard patterns like "fed-*.example.org" to pass through validation
-		// They will be expanded during reconciliation if the feature is enabled
-		if strings.Contains(value, "*") {
-			// Skip parsing for wildcard patterns; they're validated at reconciliation time
+		if enableFederatesWithPatternExpansion && strings.ContainsAny(value, "*?[") {
+			if _, err := path.Match(value, ""); err != nil {
+				return nil, fmt.Errorf("invalid federatesWith pattern: %w", err)
+			}
 			continue
 		}
 		td, err := spiffeid.TrustDomainFromString(value)

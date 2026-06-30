@@ -1,9 +1,11 @@
 package spireentry
 
 import (
+	"context"
 	"testing"
 
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
+	spirev1alpha1 "github.com/spiffe/spire-controller-manager/api/v1alpha1"
 	"github.com/spiffe/spire-controller-manager/pkg/spireapi"
 	"github.com/stretchr/testify/require"
 )
@@ -122,4 +124,54 @@ func TestFilterJoinTokenEntries(t *testing.T) {
 			require.Equal(t, tc.expected, actual)
 		})
 	}
+}
+
+func TestClusterStaticEntryPatternExpansionGate(t *testing.T) {
+	// Regression guard: by default federatesWith does not deduplicate values.
+	// Deduplication must only occur when EnableFederatesWithPatternExpansion is true.
+	staticEntry := &ClusterStaticEntry{
+		ClusterStaticEntry: spirev1alpha1.ClusterStaticEntry{
+			Spec: spirev1alpha1.ClusterStaticEntrySpec{
+				ParentID:      spiffeid.RequireFromString("spiffe://domain.test/1").String(),
+				SPIFFEID:      spiffeid.RequireFromString("spiffe://domain.test/2").String(),
+				FederatesWith: []string{"fed-a.example.org", "fed-a.example.org"},
+			},
+		},
+	}
+
+	t.Run("disabled preserves duplicates", func(t *testing.T) {
+		r := &entryReconciler{
+			config: ReconcilerConfig{
+				EnableFederatesWithPatternExpansion: false,
+			},
+		}
+		state := make(entriesState)
+		r.addClusterStaticEntryEntriesState(context.Background(), state, []*ClusterStaticEntry{staticEntry}, nil)
+		require.Equal(t, []string{"fed-a.example.org", "fed-a.example.org"}, federatesWithFromState(t, state))
+	})
+
+	t.Run("enabled deduplicates", func(t *testing.T) {
+		r := &entryReconciler{
+			config: ReconcilerConfig{
+				EnableFederatesWithPatternExpansion: true,
+			},
+		}
+		state := make(entriesState)
+		r.addClusterStaticEntryEntriesState(context.Background(), state, []*ClusterStaticEntry{staticEntry}, nil)
+		require.Equal(t, []string{"fed-a.example.org"}, federatesWithFromState(t, state))
+	})
+}
+
+func federatesWithFromState(t *testing.T, state entriesState) []string {
+	t.Helper()
+	require.Len(t, state, 1)
+	for _, s := range state {
+		require.Len(t, s.Declared, 1)
+		out := make([]string, 0, len(s.Declared[0].Entry.FederatesWith))
+		for _, td := range s.Declared[0].Entry.FederatesWith {
+			out = append(out, td.Name())
+		}
+		return out
+	}
+	return nil
 }

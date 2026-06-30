@@ -93,10 +93,10 @@ type ReconcilerConfig struct {
 	// If zero, defaults to defaultEntryRenderCacheSize.
 	EntryRenderCacheSize int
 
-	// EnableGlobPatterns enables wildcard glob pattern expansion in federatesWith fields.
-	// When disabled, glob patterns are passed through unchanged.
+	// EnableFederatesWithPatternExpansion enables pattern expansion in federatesWith fields.
+	// When disabled, patterns are passed through unchanged.
 	// Defaults to false.
-	EnableGlobPatterns bool
+	EnableFederatesWithPatternExpansion bool
 }
 
 const (
@@ -212,10 +212,10 @@ func (r *entryReconciler) reconcile(ctx context.Context) {
 
 	// Load known trust domains for wildcard expansion (only if feature enabled)
 	var knownTrustDomains []string
-	if r.config.EnableGlobPatterns {
+	if r.config.EnableFederatesWithPatternExpansion {
 		clusterFederatedTrustDomains, err := r.listClusterFederatedTrustDomains(ctx, r.expandEnvStaticManifests)
 		if err != nil {
-			log.Error(err, "Failed to list ClusterFederatedTrustDomains")
+			log.Error(err, "Failed to list known federated trust domains")
 			return
 		}
 		knownTrustDomains = make([]string, 0, len(clusterFederatedTrustDomains))
@@ -481,8 +481,9 @@ func (r *entryReconciler) addClusterStaticEntryEntriesState(ctx context.Context,
 		log := log.WithValues(clusterSPIFFEIDLogKey, objectName(clusterStaticEntry))
 
 		spec := clusterStaticEntry.Spec
-		// Expand wildcards in FederatesWith if feature enabled
-		spec.FederatesWith = expandFederatesWithWildcardsIfEnabled(spec.FederatesWith, knownTrustDomains, r.config.EnableGlobPatterns)
+		if r.config.EnableFederatesWithPatternExpansion {
+			spec.FederatesWith = expandFederatesWithPatterns(spec.FederatesWith, knownTrustDomains)
+		}
 
 		entry, err := renderStaticEntry(&spec)
 		if err != nil {
@@ -512,7 +513,13 @@ func (r *entryReconciler) addClusterSPIFFEIDEntriesState(ctx context.Context, st
 	for _, clusterSPIFFEID := range clusterSPIFFEIDs {
 		log := log.WithValues(clusterSPIFFEIDLogKey, objectName(clusterSPIFFEID))
 
-		spec, err := spirev1alpha1.ParseClusterSPIFFEIDSpec(&clusterSPIFFEID.Spec)
+		var spec *spirev1alpha1.ParsedClusterSPIFFEIDSpec
+		var err error
+		if r.config.EnableFederatesWithPatternExpansion {
+			spec, err = spirev1alpha1.ParseClusterSPIFFEIDSpecWithPatternExpansion(&clusterSPIFFEID.Spec)
+		} else {
+			spec, err = spirev1alpha1.ParseClusterSPIFFEIDSpec(&clusterSPIFFEID.Spec)
+		}
 		if err != nil {
 			// TODO: should this be prevented via admission webhook? should
 			// we dump this failure into the status?
@@ -524,17 +531,20 @@ func (r *entryReconciler) addClusterSPIFFEIDEntriesState(ctx context.Context, st
 		federatesWithStrs := clusterSPIFFEID.Spec.FederatesWith
 
 		// Log if wildcard patterns are present
-		if hasWildcardPattern(federatesWithStrs) {
-			log.Info("ClusterSPIFFEID has wildcard patterns in federatesWith",
+		if hasPattern(federatesWithStrs) {
+			log.Info("ClusterSPIFFEID has patterns in federatesWith",
 				"federatesWith", federatesWithStrs,
-				"globPatternsEnabled", r.config.EnableGlobPatterns)
+				"federatesWithPatternExpansionEnabled", r.config.EnableFederatesWithPatternExpansion)
 		}
 
-		expandedStrs := expandFederatesWithWildcardsIfEnabled(federatesWithStrs, knownTrustDomains, r.config.EnableGlobPatterns)
+		expandedStrs := federatesWithStrs
+		if r.config.EnableFederatesWithPatternExpansion {
+			expandedStrs = expandFederatesWithPatterns(federatesWithStrs, knownTrustDomains)
+		}
 
 		// Log expansion result if patterns were present
-		if hasWildcardPattern(federatesWithStrs) && r.config.EnableGlobPatterns {
-			log.Info("Expanded wildcard patterns in federatesWith",
+		if hasPattern(federatesWithStrs) && r.config.EnableFederatesWithPatternExpansion {
+			log.Info("Expanded patterns in federatesWith",
 				"original", federatesWithStrs,
 				"expanded", expandedStrs)
 		}
