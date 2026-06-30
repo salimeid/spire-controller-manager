@@ -39,6 +39,10 @@ const (
 	workloadSelectorTemplateName = "workloadSelectorTemplate"
 )
 
+// FederatesWithPatternMetacharacters are the path.Match metacharacters that mark
+// a federatesWith value as a pattern rather than a literal trust domain.
+const FederatesWithPatternMetacharacters = "*?[]"
+
 // log is for logging in this package.
 var clusterspiffeidlog = logf.Log.WithName("clusterspiffeid-resource")
 
@@ -138,17 +142,20 @@ func parseClusterSPIFFEIDSpec(spec *ClusterSPIFFEIDSpec, enableFederatesWithPatt
 
 	federatesWith := make([]spiffeid.TrustDomain, 0, len(spec.FederatesWith))
 	for _, value := range spec.FederatesWith {
-		if enableFederatesWithPatternExpansion && strings.ContainsAny(value, "*?[") {
-			if _, err := path.Match(value, ""); err != nil {
-				return nil, fmt.Errorf("invalid federatesWith pattern: %w", err)
-			}
+		td, err := spiffeid.TrustDomainFromString(value)
+		if err == nil {
+			federatesWith = append(federatesWith, td)
 			continue
 		}
-		td, err := spiffeid.TrustDomainFromString(value)
-		if err != nil {
+		// Not a literal trust domain. When pattern expansion is enabled, accept
+		// it if it is a valid pattern that could expand to a valid trust domain;
+		// the matching domains are resolved later against known trust domains.
+		if !enableFederatesWithPatternExpansion {
 			return nil, fmt.Errorf("invalid federatesWith value: %w", err)
 		}
-		federatesWith = append(federatesWith, td)
+		if err := validateFederatesWithPattern(value); err != nil {
+			return nil, err
+		}
 	}
 
 	var dnsNameTemplates []*template.Template
@@ -183,4 +190,34 @@ func parseClusterSPIFFEIDSpec(spec *ClusterSPIFFEIDSpec, enableFederatesWithPatt
 		AutoPopulateDNSNames:      spec.AutoPopulateDNSNames,
 		Hint:                      spec.Hint,
 	}, nil
+}
+
+// patternMetacharStripper removes path.Match metacharacters so the remaining
+// literal skeleton of a federatesWith pattern can be validated as a trust domain.
+var patternMetacharStripper = newMetacharStripper(FederatesWithPatternMetacharacters)
+
+func newMetacharStripper(metachars string) *strings.Replacer {
+	pairs := make([]string, 0, len(metachars)*2)
+	for _, c := range metachars {
+		pairs = append(pairs, string(c), "")
+	}
+	return strings.NewReplacer(pairs...)
+}
+
+// validateFederatesWithPattern reports whether value is a federatesWith pattern
+// that could expand to a valid trust domain. It rejects malformed glob syntax and
+// patterns whose literal characters are not valid trust domain characters.
+func validateFederatesWithPattern(value string) error {
+	if _, err := path.Match(value, ""); err != nil {
+		return fmt.Errorf("invalid federatesWith pattern: %w", err)
+	}
+	skeleton := patternMetacharStripper.Replace(value)
+	if skeleton == "" {
+		// Pattern is composed solely of wildcards; it can match a valid trust domain.
+		return nil
+	}
+	if _, err := spiffeid.TrustDomainFromString(skeleton); err != nil {
+		return fmt.Errorf("federatesWith pattern %q cannot expand to a valid trust domain: %w", value, err)
+	}
+	return nil
 }

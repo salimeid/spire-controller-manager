@@ -527,39 +527,29 @@ func (r *entryReconciler) addClusterSPIFFEIDEntriesState(ctx context.Context, st
 			continue
 		}
 
-		// Use raw federatesWith from spec (includes wildcards), not parsed spec
-		federatesWithStrs := clusterSPIFFEID.Spec.FederatesWith
-
-		// Log if wildcard patterns are present
-		if hasPattern(federatesWithStrs) {
-			log.Info("ClusterSPIFFEID has patterns in federatesWith",
-				"federatesWith", federatesWithStrs,
-				"federatesWithPatternExpansionEnabled", r.config.EnableFederatesWithPatternExpansion)
-		}
-
-		expandedStrs := federatesWithStrs
+		// When pattern expansion is enabled, replace the parsed federatesWith
+		// (which excludes pattern values) with the set expanded from the raw
+		// spec. When disabled, the parsed federatesWith is already correct.
 		if r.config.EnableFederatesWithPatternExpansion {
-			expandedStrs = expandFederatesWithPatterns(federatesWithStrs, knownTrustDomains)
-		}
-
-		// Log expansion result if patterns were present
-		if hasPattern(federatesWithStrs) && r.config.EnableFederatesWithPatternExpansion {
-			log.Info("Expanded patterns in federatesWith",
-				"original", federatesWithStrs,
-				"expanded", expandedStrs)
-		}
-
-		// Convert expanded strings back to TrustDomain objects
-		expandedFederatesWith := make([]spiffeid.TrustDomain, 0, len(expandedStrs))
-		for _, value := range expandedStrs {
-			td, err := spiffeid.TrustDomainFromString(value)
-			if err != nil {
-				log.Error(err, "Failed to parse expanded federatesWith value", "value", value)
-				continue
+			rawFederatesWith := clusterSPIFFEID.Spec.FederatesWith
+			expandedStrs := expandFederatesWithPatterns(rawFederatesWith, knownTrustDomains)
+			if hasPattern(rawFederatesWith) {
+				log.Info("Expanded patterns in federatesWith",
+					"original", rawFederatesWith,
+					"expanded", expandedStrs)
 			}
-			expandedFederatesWith = append(expandedFederatesWith, td)
+
+			expandedFederatesWith := make([]spiffeid.TrustDomain, 0, len(expandedStrs))
+			for _, value := range expandedStrs {
+				td, err := spiffeid.TrustDomainFromString(value)
+				if err != nil {
+					log.Error(err, "Failed to parse expanded federatesWith value", "value", value)
+					continue
+				}
+				expandedFederatesWith = append(expandedFederatesWith, td)
+			}
+			spec.FederatesWith = expandedFederatesWith
 		}
-		spec.FederatesWith = expandedFederatesWith
 
 		// Compute spec hash once per ClusterSPIFFEID (only needed when cache is enabled)
 		var specHash string

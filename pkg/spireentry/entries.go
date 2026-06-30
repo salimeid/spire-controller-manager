@@ -255,36 +255,35 @@ func appendIfNotExists(slice []string, sliceSet map[string]struct{}, items ...st
 	return slice
 }
 
+// expandFederatesWithPatterns resolves federatesWith patterns against the known
+// trust domains. Literal values are kept as-is; pattern values are replaced by
+// the matching known domains. Results are deduplicated: overlapping patterns or a
+// literal also matched by a pattern would otherwise inflate the entry's
+// federatesWith and cause perpetual reconcile churn, since the SPIRE server
+// stores federatesWith as a set and trustDomainsMatch is length-sensitive.
 func expandFederatesWithPatterns(patterns []string, known []string) []string {
-	if len(patterns) == 0 {
-		return []string{}
+	result := make([]string, 0, len(patterns))
+	seen := make(map[string]struct{})
+	add := func(domain string) {
+		if _, ok := seen[domain]; ok {
+			return
+		}
+		seen[domain] = struct{}{}
+		result = append(result, domain)
 	}
 
-	result := []string{}
-	seenSet := make(map[string]struct{})
-
-	for _, w := range patterns {
-		if !hasPatternToken(w) {
-			// Static domain, add as-is
-			if _, seen := seenSet[w]; !seen {
-				result = append(result, w)
-				seenSet[w] = struct{}{}
-			}
+	for _, pattern := range patterns {
+		if !hasPatternToken(pattern) {
+			// Literal trust domain, keep as-is.
+			add(pattern)
 			continue
 		}
-
-		// Wildcard pattern: match against known domains
-		expanded := []string{}
-		for _, k := range known {
-			if matched, err := path.Match(w, k); err == nil && matched {
-				if _, seen := seenSet[k]; !seen {
-					expanded = append(expanded, k)
-					seenSet[k] = struct{}{}
-				}
+		// Pattern, expand against known trust domains.
+		for _, domain := range known {
+			if matched, err := path.Match(pattern, domain); err == nil && matched {
+				add(domain)
 			}
 		}
-		sort.Strings(expanded)
-		result = append(result, expanded...)
 	}
 
 	return result
@@ -292,7 +291,7 @@ func expandFederatesWithPatterns(patterns []string, known []string) []string {
 
 // hasPatternToken reports whether s contains any path.Match metacharacter.
 func hasPatternToken(s string) bool {
-	return strings.ContainsAny(s, "*?[")
+	return strings.ContainsAny(s, spirev1alpha1.FederatesWithPatternMetacharacters)
 }
 
 // hasPattern checks if any domain contains a pattern metacharacter.
